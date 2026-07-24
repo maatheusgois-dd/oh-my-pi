@@ -63,27 +63,38 @@ const CLAUDE_TOOL_MAP: Record<string, string> = {
 
 function mapToolName(matcher: string): string[] {
 	if (matcher === "*") return ["*"];
-	const omp = CLAUDE_TOOL_MAP[matcher];
-	return omp ? [omp] : [matcher.toLowerCase()];
+	// Claude matchers support pipe-separated and comma-separated alternatives
+	// (e.g. "Edit|Write", "Bash,Read"). Split on both before mapping each.
+	const alternatives = matcher.split(/[|,]/).map(m => m.trim()).filter(Boolean);
+	const results: string[] = [];
+	for (const alt of alternatives) {
+		const omp = CLAUDE_TOOL_MAP[alt];
+		results.push(omp ?? alt.toLowerCase());
+	}
+	return results.length > 0 ? results : [matcher.toLowerCase()];
 }
 
 function toolMatches(eventToolName: string, ompNames: string[]): boolean {
 	return ompNames.some(name => name === "*" || name === eventToolName);
 }
 
-// ─── Hook execution (Claude Code stdin/stdout protocol) ───────────────────
-
 interface HookStdin {
 	tool_input: Record<string, unknown>;
 	cwd: string;
+	/** Claude session id (OMP session id) */
+	session_id?: string;
+	/** Hook event name: "PreToolUse" or "PostToolUse" */
+	hook_event_name: string;
+	/** Tool name as OMP knows it (lowercase) */
+	tool_name: string;
 }
 
 async function runShellHook(
 	command: string,
 	hookStdin: HookStdin,
 	cwd: string,
-	timeoutMs?: number,
-): Promise<{ stdout: string; code: number; killed: boolean }> {
+	timeoutSeconds?: number,
+): Promise<{ stdout: string; stderr: string; code: number; killed: boolean }> {
 	const stdinPayload = JSON.stringify(hookStdin);
 	const child = Bun.spawn(["bash", "-c", command], {
 		cwd,
@@ -92,8 +103,10 @@ async function runShellHook(
 		stderr: "pipe",
 	});
 
+	// Claude's timeout field is in seconds; setTimeout uses milliseconds.
+	const timeoutMs = timeoutSeconds && timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined;
 	let timedOut = false;
-	if (timeoutMs && timeoutMs > 0) {
+	if (timeoutMs) {
 		const timer = setTimeout(() => {
 			timedOut = true;
 			try {
@@ -102,15 +115,14 @@ async function runShellHook(
 				// Process may have already exited
 			}
 		}, timeoutMs);
-		const [stdout] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+		const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
 		clearTimeout(timer);
-		return { stdout, code: child.exitCode ?? 0, killed: timedOut };
+		return { stdout, stderr, code: child.exitCode ?? 0, killed: timedOut };
 	}
 
-	const [stdout] = await Promise.all([new Response(child.stdout).text(), child.exited]);
-	return { stdout, code: child.exitCode ?? 0, killed: false };
+	const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+	return { stdout, stderr, code: child.exitCode ?? 0, killed: false };
 }
-
 // ─── Settings.json loading ───────────────────────────────────────────────
 
 async function tryReadHooksFromSettings(settingsPath: string): Promise<ClaudeHooks | null> {
@@ -197,11 +209,13 @@ export const createSettingsHooksExtension: ExtensionFactory = api => {
 
 			for (const hook of group.hooks) {
 				if (hook.type !== "command") continue;
-				const hookStdin: HookStdin = {
+			const hookStdin: HookStdin = {
 					tool_input: event.input,
 					cwd: ctx.cwd ?? home,
+					hook_event_name: "PreToolUse",
+					tool_name: event.toolName,
 				};
-				const { stdout, code, killed } = await runShellHook(hook.command, hookStdin, ctx.cwd ?? home, hook.timeout);
+				const { stdout, stderr, code, killed } = await runShellHook(hook.command, hookStdin, ctx.cwd ?? home, hook.timeout);
 
 				if (killed) {
 					logger.warn("settings-hooks: PreToolUse hook timed out", {
@@ -211,13 +225,23 @@ export const createSettingsHooksExtension: ExtensionFactory = api => {
 					continue;
 				}
 
-				// Non-zero exit = deny (Claude Code protocol: exit 2 = block, others = error)
-				if (code !== 0) {
-					const reason = stdout.trim() || `Hook "${group.matcher}" exited with code ${code}`;
+				// Claude Code protocol: exit 2 = deny (block), other non-zero = hook error
+				// (do NOT block — a missing dependency like jq exit 127 should not deny the call)
+				if (code === 2) {
+					const reason = stderr.trim() || stdout.trim() || `Hook "${group.matcher}" denied the tool call`;
 					return { block: true, reason };
 				}
+				if (code !== 0) {
+					logger.warn("settings-hooks: PreToolUse hook error (non-blocking)", {
+						command: hook.command,
+						matcher: group.matcher,
+						code,
+						stderr: stderr.trim(),
+					});
+					continue;
+				}
 
-				// Parse JSON stdout for explicit permissionDecision
+				// exit 0 — parse JSON stdout for explicit permissionDecision
 				const trimmed = stdout.trim();
 				if (!trimmed) continue; // exit 0 + no JSON = allow
 				try {
@@ -245,9 +269,11 @@ export const createSettingsHooksExtension: ExtensionFactory = api => {
 
 			for (const hook of group.hooks) {
 				if (hook.type !== "command") continue;
-				const hookStdin: HookStdin = {
+			const hookStdin: HookStdin = {
 					tool_input: event.input,
 					cwd: ctx.cwd ?? home,
+					hook_event_name: "PostToolUse",
+					tool_name: event.toolName,
 				};
 				await runShellHook(hook.command, hookStdin, ctx.cwd ?? home, hook.timeout);
 			}

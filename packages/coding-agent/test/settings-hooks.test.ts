@@ -111,7 +111,7 @@ describe("settings-hooks extension", () => {
 		expect(result).toBeUndefined();
 	});
 
-	test("PreToolUse hook with non-zero exit code blocks the tool call", async () => {
+	test("PreToolUse hook with exit code 2 blocks the tool call (Claude deny protocol)", async () => {
 		const failScript = `echo "rejected: secret detected" >&2; exit 2`;
 		await writeUserSettings({
 			PreToolUse: [
@@ -131,7 +131,31 @@ describe("settings-hooks extension", () => {
 		const result = await api.toolCallHandlers[0](event, makeCtx());
 
 		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain("exited with code 2");
+		expect(result?.reason).toContain("rejected: secret detected");
+	});
+
+	test("PreToolUse hook with non-2 non-zero exit does not block (hook error, not deny)", async () => {
+		// exit 127 = command not found — should NOT block the tool call
+		const errorScript = `exit 127`;
+		await writeUserSettings({
+			PreToolUse: [
+				{ matcher: "Bash", hooks: [{ type: "command", command: errorScript }] },
+			],
+		});
+
+		const api = createMockApi();
+		createSettingsHooksExtension(api as any);
+
+		const event = {
+			type: "tool_call" as const,
+			toolName: "bash",
+			toolCallId: "test-3b",
+			input: { command: "ls" },
+		};
+		const result = await api.toolCallHandlers[0](event, makeCtx());
+
+		// Non-2 non-zero exit = hook error, does not block
+		expect(result).toBeUndefined();
 	});
 
 	test("PreToolUse hook with exit 0 and no JSON output allows the call", async () => {
@@ -212,6 +236,41 @@ describe("settings-hooks extension", () => {
 		const editResult = await api.toolCallHandlers[0](editEvent, makeCtx());
 		expect(editResult?.block).toBe(true);
 		expect(editResult?.reason).toBe("edit blocked");
+	});
+
+	test("PreToolUse pipe-separated matcher matches multiple tools", async () => {
+		const denyMulti = `echo '{"permissionDecision":"deny","permissionDecisionReason":"multi-blocked"}'`;
+		await writeUserSettings({
+			PreToolUse: [
+				{ matcher: "Edit|Write", hooks: [{ type: "command", command: denyMulti }] },
+			],
+		});
+
+		const api = createMockApi();
+		createSettingsHooksExtension(api as any);
+
+		// edit and write should be blocked
+		for (const toolName of ["edit", "write"]) {
+			const event = {
+				type: "tool_call" as const,
+				toolName,
+				toolCallId: `test-${toolName}`,
+				input: {},
+			};
+			const result = await api.toolCallHandlers[0](event, makeCtx());
+			expect(result?.block).toBe(true);
+			expect(result?.reason).toBe("multi-blocked");
+		}
+
+		// bash should NOT be blocked
+		const bashEvent = {
+			type: "tool_call" as const,
+			toolName: "bash",
+			toolCallId: "test-bash-multi",
+			input: { command: "ls" },
+		};
+		const bashResult = await api.toolCallHandlers[0](bashEvent, makeCtx());
+		expect(bashResult).toBeUndefined();
 	});
 
 	test("no hooks in settings.json → no handlers registered with blocking behavior", async () => {
