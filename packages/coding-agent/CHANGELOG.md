@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/undolast` (alias `/undo`) slash command that rewinds the conversation to the entry before the last user message, using the existing `navigateTree` branching infrastructure. Skips synthetic auto-continue messages and refuses to rewind past the first turn ([#5289](https://github.com/can1357/oh-my-pi/issues/5289)).
+
 ## [17.1.3] - 2026-07-24
 
 ### Fixed

@@ -1414,6 +1414,65 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.editor.setText("");
 		},
 	},
+
+	{
+		name: "undolast",
+		description: "Undo the last turn — rewind conversation to before the last user message",
+		aliases: ["undo"],
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const sessionManager = runtime.ctx.sessionManager;
+			const branch = sessionManager.getBranch();
+
+			// Find the last non-synthetic user message entry on the active branch
+			let lastUserMsgIndex = -1;
+			let userMessageCount = 0;
+			for (let i = branch.length - 1; i >= 0; i--) {
+				const entry = branch[i];
+				if (entry.type === "message" && entry.message.role === "user" && !entry.message.synthetic) {
+					if (lastUserMsgIndex === -1) lastUserMsgIndex = i;
+					userMessageCount++;
+				}
+			}
+
+			if (lastUserMsgIndex === -1) {
+				runtime.ctx.showStatus("Nothing to undo");
+				return;
+			}
+
+			if (userMessageCount <= 1) {
+				runtime.ctx.showStatus("Cannot undo the first message — use /clear instead");
+				return;
+			}
+
+			// Target the entry before the last user message (end of previous turn)
+			const targetEntry = branch[lastUserMsgIndex - 1];
+			const currentLeafId = sessionManager.getLeafId();
+
+			if (targetEntry.id === currentLeafId) {
+				runtime.ctx.showStatus("Already at the earliest undo point");
+				return;
+			}
+
+			try {
+				const result = await runtime.ctx.session.navigateTree(targetEntry.id, {
+					summarize: false,
+				});
+
+				if (result.cancelled) {
+					runtime.ctx.showStatus("Undo cancelled");
+					return;
+				}
+
+				// Update UI — rebuild the display transcript for the new leaf
+				runtime.ctx.renderInitialMessages({ clearTerminalHistory: true });
+				await runtime.ctx.reloadTodos();
+				runtime.ctx.showStatus("Undid last turn");
+			} catch (error) {
+				runtime.ctx.showError(error instanceof Error ? error.message : String(error));
+			}
+		},
+	},
 	{
 		name: "login",
 		description: "Login with OAuth provider",
