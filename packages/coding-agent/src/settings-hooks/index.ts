@@ -154,13 +154,20 @@ function toolMatches(eventToolName: string, group: ClaudeHookGroup): boolean {
 	const matcher = group.matcher;
 	// Omitted/empty matcher = match all tools
 	if (!matcher || matcher.trim() === "") return true;
+	// Pipe/comma-separated alternatives (e.g. "Edit|Write", "Bash,Read") —
+	// split and map each before trying regex, so "Edit|Write" isn't treated
+	// as a regex alternation operator.
+	if (/[|,]/.test(matcher)) {
+		const ompNames = mapToolName(matcher);
+		return ompNames.some(name => name === "*" || name === eventToolName);
+	}
 	// Regex matchers (e.g. "mcp__.*") — try as regex against the event tool name
-	if (/[.*+?^${}()|[\]\\]/.test(matcher) && !Object.prototype.hasOwnProperty.call(CLAUDE_TOOL_MAP, matcher) && matcher !== "*") {
+	if (/[.*+?^${}()\\[\]]/.test(matcher) && !Object.prototype.hasOwnProperty.call(CLAUDE_TOOL_MAP, matcher)) {
 		try {
 			const re = new RegExp(matcher, "i");
 			return re.test(eventToolName);
 		} catch {
-			// Invalid regex — fall through to exact/pattern matching
+			// Invalid regex — fall through to exact matching
 		}
 	}
 	const ompNames = mapToolName(matcher);
@@ -210,8 +217,9 @@ async function runShellHook(
 	}
 
 	// Claude's timeout field is in seconds; setTimeout uses milliseconds.
-	// Default to 60s when omitted to prevent hung hooks from blocking indefinitely.
-	const timeoutMs = (hook.timeout && hook.timeout > 0 ? hook.timeout : 60) * 1000;
+	// Default to 25s when omitted — must be below the 30s extension handler timeout
+	// to ensure the hook's own SIGTERM fires before the runner kills the handler.
+	const timeoutMs = (hook.timeout && hook.timeout > 0 ? hook.timeout : 25) * 1000;
 	let timedOut = false;
 	const timer = setTimeout(() => {
 		timedOut = true;
