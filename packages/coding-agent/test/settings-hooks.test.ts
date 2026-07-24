@@ -355,7 +355,7 @@ describe("settings-hooks extension", () => {
 		const observed = await fs.readFile(observeFile, "utf-8");
 		const parsed = JSON.parse(observed);
 		expect(parsed.hook_event_name).toBe("PostToolUse");
-		expect(parsed.tool_name).toBe("bash");
+		expect(parsed.tool_name).toBe("Bash");
 		expect(parsed.tool_use_id).toBe("test-bash");
 		expect(parsed.tool_input.command).toBe("ls");
 	});
@@ -403,5 +403,51 @@ describe("settings-hooks extension", () => {
 
 		expect(result?.block).toBe(true);
 		expect(result?.reason).toBe("nested deny");
+	});
+
+	test("PreToolUse hook with `if` filter only blocks matching commands", async () => {
+		const denyScript = `echo '{"permissionDecision":"deny","permissionDecisionReason":"push blocked"}'`;
+		await writeUserSettings({
+			PreToolUse: [
+				{ matcher: "Bash", hooks: [{ type: "command", command: denyScript, if: "Bash(git push*)" }] },
+			],
+		});
+
+		const api = createMockApi();
+		createSettingsHooksExtension(false)(api);
+
+		// git push should be blocked
+		const pushEvent = makeCallEvent("bash", { command: "git push origin main" });
+		const pushResult = await api.toolCallHandlers[0](pushEvent, makeCtx());
+		expect(pushResult?.block).toBe(true);
+		expect(pushResult?.reason).toBe("push blocked");
+
+		// ls should NOT be blocked (if filter doesn't match)
+		const lsEvent = makeCallEvent("bash", { command: "ls -la" });
+		const lsResult = await api.toolCallHandlers[0](lsEvent, makeCtx());
+		expect(lsResult).toBeUndefined();
+	});
+
+	test("PreToolUse hook stdin maps path to file_path for Read tool", async () => {
+		const observeFile = path.join(tmpCwd, "read-hook-observed.json");
+		const observeScript = `cat > "${observeFile}"`;
+		await writeUserSettings({
+			PreToolUse: [
+				{ matcher: "Read", hooks: [{ type: "command", command: observeScript }] },
+			],
+		});
+
+		const api = createMockApi();
+		createSettingsHooksExtension(false)(api);
+
+		const event = makeCallEvent("read", { path: "/tmp/test.txt" });
+		await api.toolCallHandlers[0](event, makeCtx());
+
+		const observed = await fs.readFile(observeFile, "utf-8");
+		const parsed = JSON.parse(observed);
+		// Claude expects file_path, not path
+		expect(parsed.tool_input.file_path).toBe("/tmp/test.txt");
+		expect(parsed.tool_input.path).toBe("/tmp/test.txt");
+		expect(parsed.tool_name).toBe("Read");
 	});
 });

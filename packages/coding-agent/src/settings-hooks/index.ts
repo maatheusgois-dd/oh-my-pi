@@ -15,7 +15,7 @@
  * from checked-out repositories.
  */
 import * as path from "node:path";
-import * as logger from "../../../utils/src/logger";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { ExtensionAPI, ExtensionFactory, ToolCallEvent, ToolCallEventResult, ToolResultEvent } from "../extensibility/extensions/types";
 
 // ─── Claude Code settings.json hook schema ────────────────────────────────
@@ -25,6 +25,8 @@ interface ClaudeHookEntry {
 	command: string;
 	/** Timeout in seconds (Claude convention) */
 	timeout?: number;
+	/** Optional condition filter (e.g. "Bash(git push*)") — if unsupported, the hook is skipped */
+	if?: string;
 }
 
 interface ClaudeHookGroup {
@@ -64,6 +66,17 @@ const CLAUDE_TOOL_MAP: Record<string, string> = {
 	WebSearch: "web_search",
 };
 
+/** Reverse map: OMP tool id → Claude PascalCase name (for hook stdin). */
+const OMP_TO_CLAUDE_MAP: Record<string, string> = {
+	bash: "Bash",
+	read: "Read",
+	edit: "Edit",
+	write: "Write",
+	glob: "Glob",
+	grep: "Grep",
+	web_search: "WebSearch",
+};
+
 /** OMP tool input field → Claude hook field name. */
 const TOOL_FIELD_MAP: Record<string, string> = {
 	path: "file_path",
@@ -83,6 +96,34 @@ function adaptToolInput(toolName: string, input: Record<string, unknown>): Recor
 	// Claude expects `tool_name` in the PascalCase original, not the OMP lowercase id.
 	void toolName;
 	return adapted;
+}
+
+/**
+ * Evaluate a Claude hook `if` filter (e.g. "Bash(git push*)").
+ * Pattern format: ToolName(glob_pattern) — matches the tool and checks if
+ * the tool input's primary argument matches the glob.
+ * Returns true if the filter matches, false if it doesn't (hook should be skipped).
+ */
+function evaluateIfFilter(filter: string, toolName: string, input: Record<string, unknown>): boolean {
+	const match = filter.match(/^(\w+)\((.*)\)$/);
+	if (!match) {
+		// Unrecognized filter format — err on the side of not matching (skip hook)
+		return false;
+	}
+	const [, filterTool, pattern] = match;
+	// Tool name must match (case-insensitive)
+	const ompName = CLAUDE_TOOL_MAP[filterTool] ?? filterTool.toLowerCase();
+	if (ompName !== toolName) return false;
+
+	// Glob-match the primary input field against the pattern
+	// Bash → command, Read/Write/Edit → file_path/path
+	const primaryField = toolName === "bash" ? "command" : "path";
+	const value = String(input[primaryField] ?? input.file_path ?? "");
+	if (!value) return false;
+
+	// Simple glob: * → .*, ? → .
+	const regex = new RegExp(`^${pattern.replace(/[.*+?^${}()|[\]\\]/g, c => (c === "*" ? ".*" : c === "?" ? "." : "\\" + c))}$`);
+	return regex.test(value);
 }
 
 function mapToolName(matcher: string): string[] {
@@ -261,13 +302,15 @@ export function createSettingsHooksExtension(trustProject = false): ExtensionFac
 		for (const group of hooks.PreToolUse) {
 			if (!toolMatches(event.toolName, group)) continue;
 
-			for (const hook of group.hooks) {
+		for (const hook of group.hooks) {
 				if (hook.type !== "command") continue;
-				const hookStdin: HookStdin = {
+				// Skip hooks with unsupported `if` filters rather than running them broadly
+				if (hook.if && !evaluateIfFilter(hook.if, event.toolName, event.input)) continue;
+			const hookStdin: HookStdin = {
 					tool_input: adaptToolInput(event.toolName, event.input),
 					cwd: ctx.cwd ?? home,
 					hook_event_name: "PreToolUse",
-					tool_name: event.toolName,
+					tool_name: OMP_TO_CLAUDE_MAP[event.toolName] ?? event.toolName,
 					tool_use_id: event.toolCallId,
 				};
 				const { stdout, stderr, code, killed } = await runShellHook(hook.command, hookStdin, ctx.cwd ?? home, hook.timeout);
@@ -327,11 +370,13 @@ export function createSettingsHooksExtension(trustProject = false): ExtensionFac
 
 			for (const hook of group.hooks) {
 				if (hook.type !== "command") continue;
+			// Skip hooks with unsupported `if` filters rather than running them broadly
+				if (hook.if && !evaluateIfFilter(hook.if, event.toolName, event.input)) continue;
 				const hookStdin: HookStdin = {
 					tool_input: adaptToolInput(event.toolName, event.input),
 					cwd: ctx.cwd ?? home,
 					hook_event_name: "PostToolUse",
-					tool_name: event.toolName,
+					tool_name: OMP_TO_CLAUDE_MAP[event.toolName] ?? event.toolName,
 					tool_use_id: event.toolCallId,
 					tool_response: event.content,
 				};
