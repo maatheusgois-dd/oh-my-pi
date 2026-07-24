@@ -426,6 +426,11 @@ describe("settings-hooks extension", () => {
 		const lsEvent = makeCallEvent("bash", { command: "ls -la" });
 		const lsResult = await api.toolCallHandlers[0](lsEvent, makeCtx());
 		expect(lsResult).toBeUndefined();
+
+		// chained command with git push should also be blocked
+		const chainedEvent = makeCallEvent("bash", { command: "npm test && git push origin main" });
+		const chainedResult = await api.toolCallHandlers[0](chainedEvent, makeCtx());
+		expect(chainedResult?.block).toBe(true);
 	});
 
 	test("PreToolUse hook stdin maps path to file_path for Read tool", async () => {
@@ -449,5 +454,23 @@ describe("settings-hooks extension", () => {
 		expect(parsed.tool_input.file_path).toBe("/tmp/test.txt");
 		expect(parsed.tool_input.path).toBe("/tmp/test.txt");
 		expect(parsed.tool_name).toBe("Read");
+	});
+
+	test("PreToolUse hook with exec form (args) blocks the tool call", async () => {
+		// Exec form: args array instead of command string
+		const denyScript = `echo '{"permissionDecision":"deny","permissionDecisionReason":"exec-form deny"}'`;
+		await writeUserSettings({
+			PreToolUse: [
+				{ matcher: "Bash", hooks: [{ type: "command", args: ["bash", "-c", denyScript] }] },
+			],
+		});
+
+		const api = createMockApi();
+		createSettingsHooksExtension(false)(api);
+
+		const event = makeCallEvent("bash", { command: "ls" });
+		const result = await api.toolCallHandlers[0](event, makeCtx());
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toBe("exec-form deny");
 	});
 });

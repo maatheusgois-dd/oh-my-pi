@@ -22,7 +22,10 @@ import type { ExtensionAPI, ExtensionFactory, ToolCallEvent, ToolCallEventResult
 
 interface ClaudeHookEntry {
 	type: "command";
-	command: string;
+	/** Shell command form (e.g. "echo hello") */
+	command?: string;
+	/** Exec form: array of args passed directly (e.g. ["git", "status"]) */
+	args?: string[];
 	/** Timeout in seconds (Claude convention) */
 	timeout?: number;
 	/** Optional condition filter (e.g. "Bash(git push*)") — if unsupported, the hook is skipped */
@@ -122,7 +125,16 @@ function evaluateIfFilter(filter: string, toolName: string, input: Record<string
 	if (!value) return false;
 
 	// Simple glob: * → .*, ? → .
-	const regex = new RegExp(`^${pattern.replace(/[.*+?^${}()|[\]\\]/g, c => (c === "*" ? ".*" : c === "?" ? "." : "\\" + c))}$`);
+	const globPattern = pattern.replace(/[.*+?^${}()|[\]\\]/g, c => (c === "*" ? ".*" : c === "?" ? "." : "\\" + c));
+
+	if (toolName === "bash") {
+		// For Bash commands, match any subcommand in the command string
+		// (e.g. "git *" matches "npm test && git push")
+		const regex = new RegExp(`(?:^|&&|;|\\|)\\s*${globPattern}`, "i");
+		return regex.test(value);
+	}
+	// For file tools, match the full path
+	const regex = new RegExp(`^${globPattern}$`);
 	return regex.test(value);
 }
 
@@ -174,13 +186,14 @@ interface HookStdin {
 }
 
 async function runShellHook(
-	command: string,
+	hook: ClaudeHookEntry,
 	hookStdin: HookStdin,
 	cwd: string,
-	timeoutSeconds?: number,
 ): Promise<{ stdout: string; stderr: string; code: number; killed: boolean }> {
 	const stdinPayload = JSON.stringify(hookStdin);
-	const child = Bun.spawn(["bash", "-c", command], {
+	// Support both shell form (command string) and exec form (args array)
+	const spawnArgs = hook.args ? hook.args : ["bash", "-c", hook.command ?? ""];
+	const child = Bun.spawn(spawnArgs, {
 		cwd,
 		env: { ...process.env, CLAUDE_PROJECT_DIR: cwd },
 		stdin: new TextEncoder().encode(stdinPayload),
@@ -189,7 +202,7 @@ async function runShellHook(
 	});
 
 	// Claude's timeout field is in seconds; setTimeout uses milliseconds.
-	const timeoutMs = timeoutSeconds && timeoutSeconds > 0 ? timeoutSeconds * 1000 : undefined;
+	const timeoutMs = hook.timeout && hook.timeout > 0 ? hook.timeout * 1000 : undefined;
 	let timedOut = false;
 	if (timeoutMs) {
 		const timer = setTimeout(() => {
@@ -296,8 +309,8 @@ export function createSettingsHooksExtension(trustProject = false): ExtensionFac
 
 	// PreToolUse — can block execution
 	api.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallEventResult | void> => {
-		const home = process.env.HOME ?? ctx.cwd ?? "";
-		const hooks = await ensureLoaded(ctx.cwd ?? home, home);
+	const home = process.env.HOME ?? "";
+	const hooks = await ensureLoaded(ctx.cwd, home);
 		if (!hooks?.PreToolUse) return;
 
 		for (const group of hooks.PreToolUse) {
@@ -314,7 +327,7 @@ export function createSettingsHooksExtension(trustProject = false): ExtensionFac
 					tool_name: OMP_TO_CLAUDE_MAP[event.toolName] ?? event.toolName,
 					tool_use_id: event.toolCallId,
 				};
-				const { stdout, stderr, code, killed } = await runShellHook(hook.command, hookStdin, ctx.cwd ?? home, hook.timeout);
+			const { stdout, stderr, code, killed } = await runShellHook(hook, hookStdin, ctx.cwd);
 
 				if (killed) {
 					logger.warn("settings-hooks: PreToolUse hook timed out", {
@@ -362,8 +375,8 @@ export function createSettingsHooksExtension(trustProject = false): ExtensionFac
 	api.on("tool_result", async (event: ToolResultEvent, ctx: ExtensionContext) => {
 		if (event.isError) return;
 
-		const home = process.env.HOME ?? ctx.cwd ?? "";
-		const hooks = await ensureLoaded(ctx.cwd ?? home, home);
+	const home = process.env.HOME ?? "";
+	const hooks = await ensureLoaded(ctx.cwd, home);
 		if (!hooks?.PostToolUse) return;
 
 		for (const group of hooks.PostToolUse) {
@@ -381,7 +394,7 @@ export function createSettingsHooksExtension(trustProject = false): ExtensionFac
 					tool_use_id: event.toolCallId,
 					tool_response: event.content,
 				};
-				await runShellHook(hook.command, hookStdin, ctx.cwd ?? home, hook.timeout);
+			await runShellHook(hook, hookStdin, ctx.cwd);
 			}
 		}
 	});
