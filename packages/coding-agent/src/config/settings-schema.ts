@@ -578,6 +578,7 @@ export const SETTINGS_SCHEMA = {
 		default: "light",
 		ui: {
 			tab: "appearance",
+			group: "Theme",
 			label: "Light Theme",
 			description: "Theme used when the terminal has a light background",
 			options: "runtime",
