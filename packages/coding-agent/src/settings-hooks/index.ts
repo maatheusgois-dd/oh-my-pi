@@ -210,33 +210,29 @@ async function runShellHook(
 	}
 
 	// Claude's timeout field is in seconds; setTimeout uses milliseconds.
-	const timeoutMs = hook.timeout && hook.timeout > 0 ? hook.timeout * 1000 : undefined;
+	// Default to 60s when omitted to prevent hung hooks from blocking indefinitely.
+	const timeoutMs = (hook.timeout && hook.timeout > 0 ? hook.timeout : 60) * 1000;
 	let timedOut = false;
-	if (timeoutMs) {
-		const timer = setTimeout(() => {
-			timedOut = true;
+	const timer = setTimeout(() => {
+		timedOut = true;
+		try {
+			child.kill("SIGTERM");
+		} catch {
+			// Process may have already exited
+		}
+		// Escalate to SIGKILL after 2s grace period if process traps SIGTERM
+		setTimeout(() => {
 			try {
-				child.kill("SIGTERM");
+				child.kill("SIGKILL");
 			} catch {
 				// Process may have already exited
 			}
-			// Escalate to SIGKILL after 2s grace period if process traps SIGTERM
-			setTimeout(() => {
-				try {
-					child.kill("SIGKILL");
-				} catch {
-					// Process may have already exited
-				}
-			}, 2000);
-		}, timeoutMs);
-		// Drain stdout and stderr concurrently to avoid pipe deadlock.
-		const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-		clearTimeout(timer);
-		return { stdout, stderr, code: child.exitCode ?? 0, killed: timedOut };
-	}
-
+		}, 2000);
+	}, timeoutMs);
+	// Drain stdout and stderr concurrently to avoid pipe deadlock.
 	const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-	return { stdout, stderr, code: child.exitCode ?? 0, killed: false };
+	clearTimeout(timer);
+	return { stdout, stderr, code: child.exitCode ?? 0, killed: timedOut };
 }
 
 // ─── Settings.json loading ───────────────────────────────────────────────
