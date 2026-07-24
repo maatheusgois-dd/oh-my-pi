@@ -182,6 +182,7 @@ async function runShellHook(
 	const stdinPayload = JSON.stringify(hookStdin);
 	const child = Bun.spawn(["bash", "-c", command], {
 		cwd,
+		env: { ...process.env, CLAUDE_PROJECT_DIR: cwd },
 		stdin: new TextEncoder().encode(stdinPayload),
 		stdout: "pipe",
 		stderr: "pipe",
