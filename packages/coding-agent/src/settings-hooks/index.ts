@@ -220,6 +220,14 @@ async function runShellHook(
 			} catch {
 				// Process may have already exited
 			}
+			// Escalate to SIGKILL after 2s grace period if process traps SIGTERM
+			setTimeout(() => {
+				try {
+					child.kill("SIGKILL");
+				} catch {
+					// Process may have already exited
+				}
+			}, 2000);
 		}, timeoutMs);
 		// Drain stdout and stderr concurrently to avoid pipe deadlock.
 		const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
@@ -256,25 +264,26 @@ function validateHooks(raw: Record<string, unknown>): ClaudeHooks {
 	const result: ClaudeHooks = {};
 	const pre = raw.PreToolUse;
 	const post = raw.PostToolUse;
-	if (Array.isArray(pre)) result.PreToolUse = pre.filter(isHookGroup);
-	if (Array.isArray(post)) result.PostToolUse = post.filter(isHookGroup);
+	if (Array.isArray(pre)) result.PreToolUse = pre.filter(isHookGroup).map(filterValidHooks);
+	if (Array.isArray(post)) result.PostToolUse = post.filter(isHookGroup).map(filterValidHooks);
 	return result;
 }
 
 function isHookGroup(item: unknown): item is ClaudeHookGroup {
 	if (typeof item !== "object" || item === null) return false;
 	const g = item as Record<string, unknown>;
-	// matcher is optional (omitted = match all); hooks array is required and must contain valid entries
-	if ((g.matcher !== undefined && typeof g.matcher !== "string") || !Array.isArray(g.hooks)) return false;
-	// Filter out invalid hook entries (null, non-objects, missing type/command/args)
-	return (g.hooks as unknown[]).every(h => isHookEntry(h));
+	// matcher is optional (omitted = match all); hooks array is required
+	return (g.matcher === undefined || typeof g.matcher === "string") && Array.isArray(g.hooks);
 }
 
-function isHookEntry(item: unknown): boolean {
-	if (typeof item !== "object" || item === null) return false;
-	const h = item as Record<string, unknown>;
-	return h.type === "command" && (typeof h.command === "string" || Array.isArray(h.args));
+/** Filter out invalid hook entries from a group, keeping valid siblings. */
+function filterValidHooks(group: ClaudeHookGroup): ClaudeHookGroup {
+	return {
+		matcher: group.matcher,
+		hooks: group.hooks.filter(h => h.type === "command" && (typeof h.command === "string" || Array.isArray(h.args))),
+	};
 }
+
 
 function mergeHooks(base: ClaudeHooks, addition: ClaudeHooks): void {
 	if (addition.PreToolUse) {
