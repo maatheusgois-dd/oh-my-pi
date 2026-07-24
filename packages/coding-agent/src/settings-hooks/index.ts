@@ -129,9 +129,6 @@ function evaluateIfFilter(filter: string, toolName: string, input: Record<string
 
 	if (toolName === "bash") {
 		// For Bash commands, match any subcommand in the command string.
-		// For complex shell forms (backticks, $(), etc.) we fail open (run the hook)
-		// since we can't faithfully parse all shell syntax.
-		if (/`|\$\(/.test(value)) return true;
 		const regex = new RegExp(`(?:^|&&|;|\\|)\\s*${globPattern}`, "i");
 		return regex.test(value);
 	}
@@ -236,22 +233,22 @@ async function runShellHook(
 
 // ─── Settings.json loading ───────────────────────────────────────────────
 
-async function tryReadHooksFromSettings(settingsPath: string): Promise<ClaudeHooks | null> {
+async function tryReadHooksFromSettings(settingsPath: string): Promise<{ hooks: ClaudeHooks | null; disabled: boolean }> {
 	try {
 		const content = await Bun.file(settingsPath).text();
 		const data = JSON.parse(content) as Record<string, unknown>;
-		// Honor Claude's kill switch — when disableAllHooks is true, skip all hooks
-		if (data.disableAllHooks === true) return null;
+		// Honor Claude's kill switch — when disableAllHooks is true, signal disabled
+		if (data.disableAllHooks === true) return { hooks: null, disabled: true };
 		const rawHooks = data.hooks;
-		if (!rawHooks || typeof rawHooks !== "object") return null;
-		return validateHooks(rawHooks as Record<string, unknown>);
+		if (!rawHooks || typeof rawHooks !== "object") return { hooks: null, disabled: false };
+		return { hooks: validateHooks(rawHooks as Record<string, unknown>), disabled: false };
 	} catch (err) {
-		if (err instanceof Error && err.message.includes("ENOENT")) return null;
+		if (err instanceof Error && err.message.includes("ENOENT")) return { hooks: null, disabled: false };
 		logger.warn("settings-hooks: failed to read settings.json", {
 			path: settingsPath,
 			error: err instanceof Error ? err.message : String(err),
 		});
-		return null;
+		return { hooks: null, disabled: false };
 	}
 }
 
@@ -267,8 +264,16 @@ function validateHooks(raw: Record<string, unknown>): ClaudeHooks {
 function isHookGroup(item: unknown): item is ClaudeHookGroup {
 	if (typeof item !== "object" || item === null) return false;
 	const g = item as Record<string, unknown>;
-	// matcher is optional (omitted = match all); hooks array is required
-	return (g.matcher === undefined || typeof g.matcher === "string") && Array.isArray(g.hooks);
+	// matcher is optional (omitted = match all); hooks array is required and must contain valid entries
+	if ((g.matcher !== undefined && typeof g.matcher !== "string") || !Array.isArray(g.hooks)) return false;
+	// Filter out invalid hook entries (null, non-objects, missing type/command/args)
+	return (g.hooks as unknown[]).every(h => isHookEntry(h));
+}
+
+function isHookEntry(item: unknown): boolean {
+	if (typeof item !== "object" || item === null) return false;
+	const h = item as Record<string, unknown>;
+	return h.type === "command" && (typeof h.command === "string" || Array.isArray(h.args));
 }
 
 function mergeHooks(base: ClaudeHooks, addition: ClaudeHooks): void {
@@ -291,12 +296,15 @@ async function readSettingsHooks(home: string, cwd: string, trustProject: boolea
 	// When HOME is empty/unset, path.join("", ".claude", ...) resolves to a
 	// relative path that could pick up project-level hooks as user hooks.
 	if (home) {
-		const userHooks = await tryReadHooksFromSettings(path.join(home, ".claude", "settings.json"));
+		const { hooks: userHooks, disabled } = await tryReadHooksFromSettings(path.join(home, ".claude", "settings.json"));
+		// If ANY source disables hooks, return null for the entire merge
+		if (disabled) return null;
 		if (userHooks) mergeHooks(hooks, userHooks);
 	}
 
 	if (trustProject) {
-		const projectHooks = await tryReadHooksFromSettings(path.join(cwd, ".claude", "settings.json"));
+		const { hooks: projectHooks, disabled } = await tryReadHooksFromSettings(path.join(cwd, ".claude", "settings.json"));
+		if (disabled) return null;
 		if (projectHooks) mergeHooks(hooks, projectHooks);
 	}
 
