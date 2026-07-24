@@ -193,13 +193,22 @@ async function runShellHook(
 	const stdinPayload = JSON.stringify(hookStdin);
 	// Support both shell form (command string) and exec form (args array)
 	const spawnArgs = hook.args ? hook.args : ["bash", "-c", hook.command ?? ""];
-	const child = Bun.spawn(spawnArgs, {
-		cwd,
-		env: { ...process.env, CLAUDE_PROJECT_DIR: cwd },
-		stdin: new TextEncoder().encode(stdinPayload),
-		stdout: "pipe",
-		stderr: "pipe",
-	});
+
+	let child: Bun.Subprocess;
+	try {
+		child = Bun.spawn(spawnArgs, {
+			cwd,
+			env: { ...process.env, CLAUDE_PROJECT_DIR: cwd },
+			stdin: new TextEncoder().encode(stdinPayload),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+	} catch (err) {
+		// Exec-form spawn failure (missing executable, etc.) — treat as non-blocking hook error
+		const message = err instanceof Error ? err.message : String(err);
+		logger.warn("settings-hooks: hook spawn failed", { args: spawnArgs, error: message });
+		return { stdout: "", stderr: message, code: -1, killed: false };
+	}
 
 	// Claude's timeout field is in seconds; setTimeout uses milliseconds.
 	const timeoutMs = hook.timeout && hook.timeout > 0 ? hook.timeout * 1000 : undefined;
@@ -274,8 +283,13 @@ function mergeHooks(base: ClaudeHooks, addition: ClaudeHooks): void {
 async function readSettingsHooks(home: string, cwd: string, trustProject: boolean): Promise<ClaudeHooks | null> {
 	const hooks: ClaudeHooks = {};
 
-	const userHooks = await tryReadHooksFromSettings(path.join(home, ".claude", "settings.json"));
-	if (userHooks) mergeHooks(hooks, userHooks);
+	// Only load user-level hooks from a real HOME directory.
+	// When HOME is empty/unset, path.join("", ".claude", ...) resolves to a
+	// relative path that could pick up project-level hooks as user hooks.
+	if (home) {
+		const userHooks = await tryReadHooksFromSettings(path.join(home, ".claude", "settings.json"));
+		if (userHooks) mergeHooks(hooks, userHooks);
+	}
 
 	if (trustProject) {
 		const projectHooks = await tryReadHooksFromSettings(path.join(cwd, ".claude", "settings.json"));
