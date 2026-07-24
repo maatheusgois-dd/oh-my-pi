@@ -110,11 +110,11 @@ function adaptToolInput(toolName: string, input: Record<string, unknown>): Recor
 function evaluateIfFilter(filter: string, toolName: string, input: Record<string, unknown>): boolean {
 	const match = filter.match(/^(\w+)\((.*)\)$/);
 	if (!match) {
-		// Unrecognized filter format — err on the side of not matching (skip hook)
-		return false;
+		// Unrecognized filter format — fail open (run the hook) per Claude's permission semantics
+		return true;
 	}
 	const [, filterTool, pattern] = match;
-	// Tool name must match (case-insensitive)
+	// Tool name must match
 	const ompName = CLAUDE_TOOL_MAP[filterTool] ?? filterTool.toLowerCase();
 	if (ompName !== toolName) return false;
 
@@ -122,14 +122,16 @@ function evaluateIfFilter(filter: string, toolName: string, input: Record<string
 	// Bash → command, Read/Write/Edit → file_path/path
 	const primaryField = toolName === "bash" ? "command" : "path";
 	const value = String(input[primaryField] ?? input.file_path ?? "");
-	if (!value) return false;
+	if (!value) return true; // fail open — can't evaluate
 
 	// Simple glob: * → .*, ? → .
 	const globPattern = pattern.replace(/[.*+?^${}()|[\]\\]/g, c => (c === "*" ? ".*" : c === "?" ? "." : "\\" + c));
 
 	if (toolName === "bash") {
-		// For Bash commands, match any subcommand in the command string
-		// (e.g. "git *" matches "npm test && git push")
+		// For Bash commands, match any subcommand in the command string.
+		// For complex shell forms (backticks, $(), etc.) we fail open (run the hook)
+		// since we can't faithfully parse all shell syntax.
+		if (/`|\$\(/.test(value)) return true;
 		const regex = new RegExp(`(?:^|&&|;|\\|)\\s*${globPattern}`, "i");
 		return regex.test(value);
 	}
@@ -238,6 +240,8 @@ async function tryReadHooksFromSettings(settingsPath: string): Promise<ClaudeHoo
 	try {
 		const content = await Bun.file(settingsPath).text();
 		const data = JSON.parse(content) as Record<string, unknown>;
+		// Honor Claude's kill switch — when disableAllHooks is true, skip all hooks
+		if (data.disableAllHooks === true) return null;
 		const rawHooks = data.hooks;
 		if (!rawHooks || typeof rawHooks !== "object") return null;
 		return validateHooks(rawHooks as Record<string, unknown>);
@@ -327,6 +331,7 @@ export function createSettingsHooksExtension(trustProject = false): ExtensionFac
 	const hooks = await ensureLoaded(ctx.cwd, home);
 		if (!hooks?.PreToolUse) return;
 
+	let denyResult: ToolCallEventResult | undefined;
 		for (const group of hooks.PreToolUse) {
 			if (!toolMatches(event.toolName, group)) continue;
 
@@ -355,7 +360,8 @@ export function createSettingsHooksExtension(trustProject = false): ExtensionFac
 				// (do NOT block — a missing dependency like jq exit 127 should not deny the call)
 				if (code === 2) {
 					const reason = stderr.trim() || stdout.trim() || `Hook "${group.matcher ?? "*"}" denied the tool call`;
-					return { block: true, reason };
+					denyResult = { block: true, reason };
+					continue; // run remaining hooks (audit/logging) before returning
 				}
 				if (code !== 0) {
 					logger.warn("settings-hooks: PreToolUse hook error (non-blocking)", {
@@ -375,13 +381,15 @@ export function createSettingsHooksExtension(trustProject = false): ExtensionFac
 					const decision = parsed.permissionDecision ?? parsed.hookSpecificOutput?.permissionDecision;
 					const reason = parsed.permissionDecisionReason ?? parsed.hookSpecificOutput?.permissionDecisionReason;
 					if (decision === "deny") {
-						return { block: true, reason: reason || `Blocked by PreToolUse hook: ${group.matcher ?? "*"}` };
+						denyResult = { block: true, reason: reason || `Blocked by PreToolUse hook: ${group.matcher ?? "*"}` };
+						continue; // run remaining hooks before returning
 					}
 				} catch {
 					// Non-JSON stdout with exit 0 = allow (informational output)
 				}
 			}
 		}
+		return denyResult;
 	});
 
 	// PostToolUse — fires only on successful tool results (Claude reserves
