@@ -5335,6 +5335,29 @@ export const SETTINGS_SCHEMA = {
 		default: "unset" as const,
 	},
 
+	"claudeHooks.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Claude Code Hooks",
+			description:
+				"Execute PreToolUse/PostToolUse hooks from ~/.claude/settings.json and .claude/settings.json. Off by default — enabling project hooks from untrusted repos can run arbitrary shell commands",
+		},
+	},
+
+	"claudeHooks.trustProject": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Trust Project Hooks",
+			description: "Also execute hooks from .claude/settings.json in the project directory (not just ~/.claude/settings.json)",
+		},
+	},
+
 	"gc.blobs": { type: "boolean", default: true },
 
 	"gc.archive": { type: "boolean", default: true },

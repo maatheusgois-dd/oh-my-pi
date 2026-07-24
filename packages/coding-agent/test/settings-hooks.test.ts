@@ -1,8 +1,16 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import { createSettingsHooksExtension } from "../src/settings-hooks";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	ToolCallEvent,
+	ToolCallEventResult,
+	ToolResultEvent,
+	ToolResultEventResult,
+} from "../src/extensibility/extensions/types";
 
 /**
  * Integration tests for the settings-hooks extension — verifies that
@@ -39,25 +47,54 @@ describe("settings-hooks extension", () => {
 		await fs.writeFile(path.join(dir, "settings.json"), JSON.stringify({ hooks }));
 	}
 
-	/**
-	 * Create a minimal extension API mock that collects `tool_call` handlers
-	 * and lets us invoke them with a fabricated event.
-	 */
-	function createMockApi() {
-		const toolCallHandlers: Array<(event: any, ctx: any) => Promise<any>> = [];
-		const toolResultHandlers: Array<(event: any, ctx: any) => Promise<any>> = [];
-		return {
-			on(event: string, handler: (event: any, ctx: any) => Promise<any>): void {
-				if (event === "tool_call") toolCallHandlers.push(handler);
-				if (event === "tool_result") toolResultHandlers.push(handler);
-			},
-			toolCallHandlers,
-			toolResultHandlers,
-		};
+	/** Minimal mock of ExtensionAPI that collects event handlers. */
+	interface MockApi {
+		toolCallHandlers: Array<(event: ToolCallEvent, ctx: ExtensionContext) => Promise<ToolCallEventResult | void>>;
+		toolResultHandlers: Array<(event: ToolResultEvent, ctx: ExtensionContext) => Promise<ToolResultEventResult | void>>;
+		on: ExtensionAPI["on"];
 	}
 
-	function makeCtx(cwd: string = tmpCwd): { cwd: string } {
-		return { cwd };
+	function createMockApi(): MockApi {
+		const toolCallHandlers: MockApi["toolCallHandlers"] = [];
+		const toolResultHandlers: MockApi["toolResultHandlers"] = [];
+		const on: ExtensionAPI["on"] = (event, handler) => {
+			if (event === "tool_call") toolCallHandlers.push(handler as MockApi["toolCallHandlers"][number]);
+			if (event === "tool_result") toolResultHandlers.push(handler as MockApi["toolResultHandlers"][number]);
+		};
+		return { on, toolCallHandlers, toolResultHandlers };
+	}
+
+	function makeCtx(cwd: string = tmpCwd): ExtensionContext {
+		// Minimal context — only fields the extension actually uses.
+		return { cwd } as unknown as ExtensionContext;
+	}
+
+	/** Fabricate a ToolCallEvent for the given tool. */
+	function makeCallEvent(toolName: string, input: Record<string, unknown> = {}): ToolCallEvent {
+		return {
+			type: "tool_call",
+			toolName,
+			toolCallId: `test-${toolName}`,
+			input,
+		} as unknown as ToolCallEvent;
+	}
+
+	/** Fabricate a ToolResultEvent for the given tool. */
+	function makeResultEvent(
+		toolName: string,
+		input: Record<string, unknown>,
+		content: Array<{ type: "text"; text: string }>,
+		isError = false,
+	): ToolResultEvent {
+		return {
+			type: "tool_result",
+			toolName,
+			toolCallId: `test-${toolName}`,
+			input,
+			content,
+			isError,
+			details: undefined,
+		} as unknown as ToolResultEvent;
 	}
 
 	test("PreToolUse hook with permissionDecision deny blocks the tool call", async () => {
@@ -70,22 +107,13 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(api as any);
+		createSettingsHooksExtension(false)(api);
 
-		expect(api.toolCallHandlers).toHaveLength(1);
-
-		const event = {
-			type: "tool_call" as const,
-			toolName: "bash",
-			toolCallId: "test-1",
-			input: { command: "git push origin main" },
-		};
+		const event = makeCallEvent("bash", { command: "git push origin main" });
 		const result = await api.toolCallHandlers[0](event, makeCtx());
 
-		expect(result).toEqual({
-			block: true,
-			reason: "direct push to main is not allowed",
-		});
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toBe("direct push to main is not allowed");
 	});
 
 	test("PreToolUse hook with permissionDecision allow does not block", async () => {
@@ -97,14 +125,9 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(api as any);
+		createSettingsHooksExtension(false)(api);
 
-		const event = {
-			type: "tool_call" as const,
-			toolName: "bash",
-			toolCallId: "test-2",
-			input: { command: "echo hello" },
-		};
+		const event = makeCallEvent("bash", { command: "echo hello" });
 		const result = await api.toolCallHandlers[0](event, makeCtx());
 
 		// allow → no block (undefined return)
@@ -120,17 +143,13 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(api as any);
+		createSettingsHooksExtension(false)(api);
 
-		const event = {
-			type: "tool_call" as const,
-			toolName: "bash",
-			toolCallId: "test-3",
-			input: { command: "git commit" },
-		};
+		const event = makeCallEvent("bash", { command: "git commit" });
 		const result = await api.toolCallHandlers[0](event, makeCtx());
 
 		expect(result?.block).toBe(true);
+		// stderr is the Claude deny reason, not stdout
 		expect(result?.reason).toContain("rejected: secret detected");
 	});
 
@@ -144,14 +163,9 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(api as any);
+		createSettingsHooksExtension(false)(api);
 
-		const event = {
-			type: "tool_call" as const,
-			toolName: "bash",
-			toolCallId: "test-3b",
-			input: { command: "ls" },
-		};
+		const event = makeCallEvent("bash", { command: "ls" });
 		const result = await api.toolCallHandlers[0](event, makeCtx());
 
 		// Non-2 non-zero exit = hook error, does not block
@@ -167,14 +181,9 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(api as any);
+		createSettingsHooksExtension(false)(api);
 
-		const event = {
-			type: "tool_call" as const,
-			toolName: "bash",
-			toolCallId: "test-4",
-			input: { command: "ls" },
-		};
+		const event = makeCallEvent("bash", { command: "ls" });
 		const result = await api.toolCallHandlers[0](event, makeCtx());
 
 		expect(result).toBeUndefined();
@@ -189,16 +198,11 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(api as any);
+		createSettingsHooksExtension(false)(api);
 
 		// Should block any tool
 		for (const toolName of ["bash", "read", "write", "edit"]) {
-			const event = {
-				type: "tool_call" as const,
-				toolName,
-				toolCallId: `test-${toolName}`,
-				input: {},
-			};
+			const event = makeCallEvent(toolName);
 			const result = await api.toolCallHandlers[0](event, makeCtx());
 			expect(result?.block).toBe(true);
 			expect(result?.reason).toBe("all blocked");
@@ -214,28 +218,18 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(api as any);
-
-		// bash should not be blocked
-		const bashEvent = {
-			type: "tool_call" as const,
-			toolName: "bash",
-			toolCallId: "test-bash",
-			input: { command: "ls" },
-		};
-		const bashResult = await api.toolCallHandlers[0](bashEvent, makeCtx());
-		expect(bashResult).toBeUndefined();
+		createSettingsHooksExtension(false)(api);
 
 		// edit should be blocked
-		const editEvent = {
-			type: "tool_call" as const,
-			toolName: "edit",
-			toolCallId: "test-edit",
-			input: {},
-		};
+		const editEvent = makeCallEvent("edit");
 		const editResult = await api.toolCallHandlers[0](editEvent, makeCtx());
 		expect(editResult?.block).toBe(true);
 		expect(editResult?.reason).toBe("edit blocked");
+
+		// bash should NOT be blocked
+		const bashEvent = makeCallEvent("bash", { command: "ls" });
+		const bashResult = await api.toolCallHandlers[0](bashEvent, makeCtx());
+		expect(bashResult).toBeUndefined();
 	});
 
 	test("PreToolUse pipe-separated matcher matches multiple tools", async () => {
@@ -247,30 +241,40 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(api as any);
+		createSettingsHooksExtension(false)(api);
 
 		// edit and write should be blocked
 		for (const toolName of ["edit", "write"]) {
-			const event = {
-				type: "tool_call" as const,
-				toolName,
-				toolCallId: `test-${toolName}`,
-				input: {},
-			};
+			const event = makeCallEvent(toolName);
 			const result = await api.toolCallHandlers[0](event, makeCtx());
 			expect(result?.block).toBe(true);
 			expect(result?.reason).toBe("multi-blocked");
 		}
 
 		// bash should NOT be blocked
-		const bashEvent = {
-			type: "tool_call" as const,
-			toolName: "bash",
-			toolCallId: "test-bash-multi",
-			input: { command: "ls" },
-		};
+		const bashEvent = makeCallEvent("bash", { command: "ls" });
 		const bashResult = await api.toolCallHandlers[0](bashEvent, makeCtx());
 		expect(bashResult).toBeUndefined();
+	});
+
+	test("PreToolUse omitted matcher matches all tools (Claude convention)", async () => {
+		const denyAll = `echo '{"permissionDecision":"deny","permissionDecisionReason":"no-matcher-block"}'`;
+		await writeUserSettings({
+			PreToolUse: [
+				// No matcher field — should match all
+				{ hooks: [{ type: "command", command: denyAll }] } as Record<string, unknown>,
+			] as unknown as Array<Record<string, unknown>>,
+		});
+
+		const api = createMockApi();
+		createSettingsHooksExtension(false)(api);
+
+		for (const toolName of ["bash", "read", "edit"]) {
+			const event = makeCallEvent(toolName);
+			const result = await api.toolCallHandlers[0](event, makeCtx());
+			expect(result?.block).toBe(true);
+			expect(result?.reason).toBe("no-matcher-block");
+		}
 	});
 
 	test("no hooks in settings.json → no handlers registered with blocking behavior", async () => {
@@ -280,16 +284,10 @@ describe("settings-hooks extension", () => {
 		await fs.writeFile(path.join(dir, "settings.json"), JSON.stringify({ someOtherKey: true }));
 
 		const api = createMockApi();
-		createSettingsHooksExtension(api as any);
+		createSettingsHooksExtension(false)(api);
 
-		// tool_call handler is registered but should be inert (no hooks found)
-		expect(api.toolCallHandlers).toHaveLength(1);
-		const event = {
-			type: "tool_call" as const,
-			toolName: "bash",
-			toolCallId: "test-noop",
-			input: { command: "ls" },
-		};
+		// Even though handlers are registered, they should find no hooks and not block
+		const event = makeCallEvent("bash", { command: "ls" });
 		const result = await api.toolCallHandlers[0](event, makeCtx());
 		expect(result).toBeUndefined();
 	});
@@ -317,28 +315,23 @@ describe("settings-hooks extension", () => {
 		);
 
 		const api = createMockApi();
-		createSettingsHooksExtension(api as any);
+		createSettingsHooksExtension(true)(api);
 
 		// bash → blocked by user-level hook
-		const bashResult = await api.toolCallHandlers[0](
-			{ type: "tool_call", toolName: "bash", toolCallId: "t1", input: { command: "ls" } },
-			makeCtx(),
-		);
+		const bashResult = await api.toolCallHandlers[0](makeCallEvent("bash", { command: "ls" }), makeCtx());
 		expect(bashResult?.block).toBe(true);
 		expect(bashResult?.reason).toBe("user-level deny");
 
 		// write → blocked by project-level hook
-		const writeResult = await api.toolCallHandlers[0](
-			{ type: "tool_call", toolName: "write", toolCallId: "t2", input: {} },
-			makeCtx(),
-		);
+		const writeResult = await api.toolCallHandlers[0](makeCallEvent("write"), makeCtx());
 		expect(writeResult?.block).toBe(true);
 		expect(writeResult?.reason).toBe("project-level deny");
 	});
 
-	test("PostToolUse hook is invoked and does not block", async () => {
-		// PostToolUse hook that just echoes (observation)
-		const observeScript = `echo "observed" > /dev/null; exit 0`;
+	test("PostToolUse hook receives tool result and does not block", async () => {
+		// PostToolUse hook writes stdin to a temp file so we can verify it ran
+		const observeFile = path.join(tmpCwd, "post-hook-observed.json");
+		const observeScript = `cat > "${observeFile}"`;
 		await writeUserSettings({
 			PostToolUse: [
 				{ matcher: "Bash", hooks: [{ type: "command", command: observeScript }] },
@@ -346,22 +339,51 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(api as any);
+		createSettingsHooksExtension(false)(api);
 
 		expect(api.toolResultHandlers).toHaveLength(1);
 
-		const event = {
-			type: "tool_result" as const,
-			toolName: "bash",
-			toolCallId: "test-post",
-			input: { command: "ls" },
-			content: [{ type: "text", text: "file1.txt\nfile2.txt" }],
-			details: undefined,
-			isError: false,
-		};
-		// Should not throw and should return undefined (no modification)
+		const event = makeResultEvent(
+			"bash",
+			{ command: "ls" },
+			[{ type: "text", text: "file1.txt\nfile2.txt" }],
+		);
 		const result = await api.toolResultHandlers[0](event, makeCtx());
 		expect(result).toBeUndefined();
+
+		// Verify the hook actually ran — the file should contain the hook stdin JSON
+		const observed = await fs.readFile(observeFile, "utf-8");
+		const parsed = JSON.parse(observed);
+		expect(parsed.hook_event_name).toBe("PostToolUse");
+		expect(parsed.tool_name).toBe("bash");
+		expect(parsed.tool_use_id).toBe("test-bash");
+		expect(parsed.tool_input.command).toBe("ls");
+	});
+
+	test("PostToolUse hook does NOT fire on error results", async () => {
+		// Hook that would write a file if invoked
+		const observeFile = path.join(tmpCwd, "post-hook-should-not-exist.json");
+		const observeScript = `cat > "${observeFile}"`;
+		await writeUserSettings({
+			PostToolUse: [
+				{ matcher: "Bash", hooks: [{ type: "command", command: observeScript }] },
+			],
+		});
+
+		const api = createMockApi();
+		createSettingsHooksExtension(false)(api);
+
+		const event = makeResultEvent(
+			"bash",
+			{ command: "ls" },
+			[{ type: "text", text: "error: command not found" }],
+			true, // isError = true
+		);
+		await api.toolResultHandlers[0](event, makeCtx());
+
+		// The file should NOT exist — PostToolUse must not fire on errors
+		const exists = await Bun.file(observeFile).exists();
+		expect(exists).toBe(false);
 	});
 
 	test("hookSpecificOutput.permissionDecision deny also blocks", async () => {
@@ -374,14 +396,9 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(api as any);
+		createSettingsHooksExtension(false)(api);
 
-		const event = {
-			type: "tool_call" as const,
-			toolName: "bash",
-			toolCallId: "test-nested",
-			input: { command: "rm -rf /" },
-		};
+		const event = makeCallEvent("bash", { command: "rm -rf /" });
 		const result = await api.toolCallHandlers[0](event, makeCtx());
 
 		expect(result?.block).toBe(true);

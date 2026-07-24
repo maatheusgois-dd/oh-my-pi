@@ -9,25 +9,28 @@
  * and map `permissionDecision: "deny"` onto the existing `beforeToolCall`
  * block result.
  *
- * The feature activates when `settings.json` contains a `hooks` key — the
- * Claude Code native signal.  When no hooks are found the extension
- * registers no handlers and is inert.
+ * Security: requires the `claudeHooks.enabled` setting to be turned on.
+ * Project-level hooks (`.claude/settings.json` in the repo) additionally
+ * require `claudeHooks.trustProject` to avoid executing untrusted commands
+ * from checked-out repositories.
  */
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
-import type { ExtensionFactory, ToolCallEvent, ToolCallEventResult, ToolResultEvent } from "../extensibility/extensions";
-import type { ExtensionContext } from "../extensibility/extensions/types";
 import * as logger from "../../../utils/src/logger";
+import type { ExtensionAPI, ExtensionFactory, ToolCallEvent, ToolCallEventResult, ToolResultEvent } from "../extensibility/extensions/types";
+
 // ─── Claude Code settings.json hook schema ────────────────────────────────
 
 interface ClaudeHookEntry {
 	type: "command";
 	command: string;
+	/** Timeout in seconds (Claude convention) */
 	timeout?: number;
 }
 
 interface ClaudeHookGroup {
-	matcher: string;
+	/** Claude matcher pattern. Omitted/empty = match all. Supports pipe/comma
+	 * alternatives ("Edit|Write") and regex ("mcp__.*"). */
+	matcher?: string;
 	hooks: ClaudeHookEntry[];
 }
 
@@ -61,6 +64,27 @@ const CLAUDE_TOOL_MAP: Record<string, string> = {
 	WebSearch: "web_search",
 };
 
+/** OMP tool input field → Claude hook field name. */
+const TOOL_FIELD_MAP: Record<string, string> = {
+	path: "file_path",
+	file_path: "file_path",
+	command: "command",
+	pattern: "pattern",
+};
+
+/** Translate an OMP tool input payload to Claude's expected field names. */
+function adaptToolInput(toolName: string, input: Record<string, unknown>): Record<string, unknown> {
+	const adapted: Record<string, unknown> = { ...input };
+	for (const [omp, claude] of Object.entries(TOOL_FIELD_MAP)) {
+		if (omp !== claude && omp in adapted && !(claude in adapted)) {
+			adapted[claude] = adapted[omp];
+		}
+	}
+	// Claude expects `tool_name` in the PascalCase original, not the OMP lowercase id.
+	void toolName;
+	return adapted;
+}
+
 function mapToolName(matcher: string): string[] {
 	if (matcher === "*") return ["*"];
 	// Claude matchers support pipe-separated and comma-separated alternatives
@@ -74,19 +98,38 @@ function mapToolName(matcher: string): string[] {
 	return results.length > 0 ? results : [matcher.toLowerCase()];
 }
 
-function toolMatches(eventToolName: string, ompNames: string[]): boolean {
+function toolMatches(eventToolName: string, group: ClaudeHookGroup): boolean {
+	const matcher = group.matcher;
+	// Omitted/empty matcher = match all tools
+	if (!matcher || matcher.trim() === "") return true;
+	// Regex matchers (e.g. "mcp__.*") — try as regex against the event tool name
+	if (/[.*+?^${}()|[\]\\]/.test(matcher) && !Object.prototype.hasOwnProperty.call(CLAUDE_TOOL_MAP, matcher) && matcher !== "*") {
+		try {
+			const re = new RegExp(matcher, "i");
+			return re.test(eventToolName);
+		} catch {
+			// Invalid regex — fall through to exact/pattern matching
+		}
+	}
+	const ompNames = mapToolName(matcher);
 	return ompNames.some(name => name === "*" || name === eventToolName);
 }
+
+// ─── Hook execution (Claude Code stdin/stdout protocol) ───────────────────
 
 interface HookStdin {
 	tool_input: Record<string, unknown>;
 	cwd: string;
-	/** Claude session id (OMP session id) */
+	/** OMP session id */
 	session_id?: string;
 	/** Hook event name: "PreToolUse" or "PostToolUse" */
 	hook_event_name: string;
-	/** Tool name as OMP knows it (lowercase) */
+	/** Tool name (OMP lowercase id) */
 	tool_name: string;
+	/** Unique tool call id */
+	tool_use_id?: string;
+	/** PostToolUse: the tool result (Claude sends `tool_response`) */
+	tool_response?: unknown;
 }
 
 async function runShellHook(
@@ -115,6 +158,7 @@ async function runShellHook(
 				// Process may have already exited
 			}
 		}, timeoutMs);
+		// Drain stdout and stderr concurrently to avoid pipe deadlock.
 		const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
 		clearTimeout(timer);
 		return { stdout, stderr, code: child.exitCode ?? 0, killed: timedOut };
@@ -123,6 +167,7 @@ async function runShellHook(
 	const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
 	return { stdout, stderr, code: child.exitCode ?? 0, killed: false };
 }
+
 // ─── Settings.json loading ───────────────────────────────────────────────
 
 async function tryReadHooksFromSettings(settingsPath: string): Promise<ClaudeHooks | null> {
@@ -154,7 +199,8 @@ function validateHooks(raw: Record<string, unknown>): ClaudeHooks {
 function isHookGroup(item: unknown): item is ClaudeHookGroup {
 	if (typeof item !== "object" || item === null) return false;
 	const g = item as Record<string, unknown>;
-	return typeof g.matcher === "string" && Array.isArray(g.hooks);
+	// matcher is optional (omitted = match all); hooks array is required
+	return (g.matcher === undefined || typeof g.matcher === "string") && Array.isArray(g.hooks);
 }
 
 function mergeHooks(base: ClaudeHooks, addition: ClaudeHooks): void {
@@ -166,14 +212,20 @@ function mergeHooks(base: ClaudeHooks, addition: ClaudeHooks): void {
 	}
 }
 
-async function readSettingsHooks(home: string, cwd: string): Promise<ClaudeHooks | null> {
+/**
+ * Read hooks from user-level settings.json (always) and project-level
+ * settings.json (only when `trustProject` is true).
+ */
+async function readSettingsHooks(home: string, cwd: string, trustProject: boolean): Promise<ClaudeHooks | null> {
 	const hooks: ClaudeHooks = {};
 
 	const userHooks = await tryReadHooksFromSettings(path.join(home, ".claude", "settings.json"));
 	if (userHooks) mergeHooks(hooks, userHooks);
 
-	const projectHooks = await tryReadHooksFromSettings(path.join(cwd, ".claude", "settings.json"));
-	if (projectHooks) mergeHooks(hooks, projectHooks);
+	if (trustProject) {
+		const projectHooks = await tryReadHooksFromSettings(path.join(cwd, ".claude", "settings.json"));
+		if (projectHooks) mergeHooks(hooks, projectHooks);
+	}
 
 	const hasHooks = Boolean(hooks.PreToolUse?.length || hooks.PostToolUse?.length);
 	return hasHooks ? hooks : null;
@@ -181,18 +233,20 @@ async function readSettingsHooks(home: string, cwd: string): Promise<ClaudeHooks
 
 // ─── Extension factory ───────────────────────────────────────────────────
 
-export const createSettingsHooksExtension: ExtensionFactory = api => {
+export function createSettingsHooksExtension(trustProject = false): ExtensionFactory {
+	return (api: ExtensionAPI) => {
 	let loadedHooks: ClaudeHooks | null | undefined;
 	let loadedCwd: string | null = null;
 
 	const ensureLoaded = async (cwd: string, home: string): Promise<ClaudeHooks | null> => {
 		if (loadedCwd === cwd && loadedHooks !== undefined) return loadedHooks;
 		loadedCwd = cwd;
-		loadedHooks = await readSettingsHooks(home, cwd);
+		loadedHooks = await readSettingsHooks(home, cwd, trustProject);
 		if (loadedHooks) {
 			logger.info("settings-hooks: loaded Claude Code hooks from settings.json", {
 				preToolUse: loadedHooks.PreToolUse?.length ?? 0,
 				postToolUse: loadedHooks.PostToolUse?.length ?? 0,
+				trustProject,
 			});
 		}
 		return loadedHooks;
@@ -205,15 +259,16 @@ export const createSettingsHooksExtension: ExtensionFactory = api => {
 		if (!hooks?.PreToolUse) return;
 
 		for (const group of hooks.PreToolUse) {
-			if (!toolMatches(event.toolName, mapToolName(group.matcher))) continue;
+			if (!toolMatches(event.toolName, group)) continue;
 
 			for (const hook of group.hooks) {
 				if (hook.type !== "command") continue;
-			const hookStdin: HookStdin = {
-					tool_input: event.input,
+				const hookStdin: HookStdin = {
+					tool_input: adaptToolInput(event.toolName, event.input),
 					cwd: ctx.cwd ?? home,
 					hook_event_name: "PreToolUse",
 					tool_name: event.toolName,
+					tool_use_id: event.toolCallId,
 				};
 				const { stdout, stderr, code, killed } = await runShellHook(hook.command, hookStdin, ctx.cwd ?? home, hook.timeout);
 
@@ -228,7 +283,7 @@ export const createSettingsHooksExtension: ExtensionFactory = api => {
 				// Claude Code protocol: exit 2 = deny (block), other non-zero = hook error
 				// (do NOT block — a missing dependency like jq exit 127 should not deny the call)
 				if (code === 2) {
-					const reason = stderr.trim() || stdout.trim() || `Hook "${group.matcher}" denied the tool call`;
+					const reason = stderr.trim() || stdout.trim() || `Hook "${group.matcher ?? "*"}" denied the tool call`;
 					return { block: true, reason };
 				}
 				if (code !== 0) {
@@ -249,7 +304,7 @@ export const createSettingsHooksExtension: ExtensionFactory = api => {
 					const decision = parsed.permissionDecision ?? parsed.hookSpecificOutput?.permissionDecision;
 					const reason = parsed.permissionDecisionReason ?? parsed.hookSpecificOutput?.permissionDecisionReason;
 					if (decision === "deny") {
-						return { block: true, reason: reason || `Blocked by PreToolUse hook: ${group.matcher}` };
+						return { block: true, reason: reason || `Blocked by PreToolUse hook: ${group.matcher ?? "*"}` };
 					}
 				} catch {
 					// Non-JSON stdout with exit 0 = allow (informational output)
@@ -258,25 +313,31 @@ export const createSettingsHooksExtension: ExtensionFactory = api => {
 		}
 	});
 
-	// PostToolUse — can observe results (modification is a future enhancement)
+	// PostToolUse — fires only on successful tool results (Claude reserves
+	// PostToolUseFailure for errors; we guard isError until that exists).
 	api.on("tool_result", async (event: ToolResultEvent, ctx: ExtensionContext) => {
+		if (event.isError) return;
+
 		const home = process.env.HOME ?? ctx.cwd ?? "";
 		const hooks = await ensureLoaded(ctx.cwd ?? home, home);
 		if (!hooks?.PostToolUse) return;
 
 		for (const group of hooks.PostToolUse) {
-			if (!toolMatches(event.toolName, mapToolName(group.matcher))) continue;
+			if (!toolMatches(event.toolName, group)) continue;
 
 			for (const hook of group.hooks) {
 				if (hook.type !== "command") continue;
-			const hookStdin: HookStdin = {
-					tool_input: event.input,
+				const hookStdin: HookStdin = {
+					tool_input: adaptToolInput(event.toolName, event.input),
 					cwd: ctx.cwd ?? home,
 					hook_event_name: "PostToolUse",
 					tool_name: event.toolName,
+					tool_use_id: event.toolCallId,
+					tool_response: event.content,
 				};
 				await runShellHook(hook.command, hookStdin, ctx.cwd ?? home, hook.timeout);
 			}
 		}
 	});
+	};
 };

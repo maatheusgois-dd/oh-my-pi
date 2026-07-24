@@ -1902,7 +1902,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 			inlineExtensions.push(...(options.extensions ?? []));
 			inlineExtensions.push(createAutoresearchExtension);
-			inlineExtensions.push(createSettingsHooksExtension);
+		if (settings.get("claudeHooks.enabled")) {
+			inlineExtensions.push(createSettingsHooksExtension(settings.get("claudeHooks.trustProject") ?? false));
+		}
 			if (customTools.length > 0) {
 				inlineExtensions.push(createCustomToolsExtension(customTools));
 			}
