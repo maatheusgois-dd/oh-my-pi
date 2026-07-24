@@ -280,7 +280,7 @@ function isHookGroup(item: unknown): item is ClaudeHookGroup {
 function filterValidHooks(group: ClaudeHookGroup): ClaudeHookGroup {
 	return {
 		matcher: group.matcher,
-		hooks: group.hooks.filter(h => h.type === "command" && (typeof h.command === "string" || Array.isArray(h.args))),
+		hooks: group.hooks.filter(h => typeof h === "object" && h !== null && h.type === "command" && (typeof h.command === "string" || Array.isArray(h.args))),
 	};
 }
 
