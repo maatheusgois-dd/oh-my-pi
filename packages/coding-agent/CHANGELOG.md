@@ -65,6 +65,9 @@
 - Fixed spilled tool-output artifact descriptors leaking on error/abort paths. `OutputSink.dump()` was the only path that closed the spill `Bun.FileSink`, but the bash and Python executors re-throw on failure and their `finally` blocks never closed the sink, so a large-output command that errored leaked the artifact descriptor until an unrelated read (e.g. a `SKILL.md` load) hit `EMFILE`. `OutputSink` now exposes an idempotent `dispose()` that closes the sink exactly once, wired into every executor's `finally` ([#6463](https://github.com/can1357/oh-my-pi/issues/6463)).
 - Fixed the first submitted prompt stalling while the local tiny-title worker started: the interactive submit handler now paints the pending user row before starting title generation, and startup prewarms an idle, unref'd worker so the first submit reuses a live subprocess instead of paying spawn latency ahead of the first frame ([#6462](https://github.com/can1357/oh-my-pi/issues/6462)).
 - Fixed legacy Pi extensions failing validation when importing the upstream `keyText` keybinding helper ([#6470](https://github.com/can1357/oh-my-pi/issues/6470)).
+### Added
+
+- Added execution of Claude Code `PreToolUse`/`PostToolUse` hooks defined in `~/.claude/settings.json` and `.claude/settings.json`. Hooks are parsed from the `hooks` key, translated from Claude's PascalCase tool matchers (`Bash`, `Edit`, `Write`, `Read`) to OMP tool ids, and shell-executed with Claude's stdin/stdout protocol (`{"tool_input": ..., "cwd": ...}`). A `permissionDecision: "deny"` or non-zero exit code blocks the tool call via the existing `tool_call` event bus, reusing the `beforeToolCall` seam. PostToolUse hooks observe tool results. The feature activates automatically when `settings.json` contains a `hooks` key.
 
 ## [17.1.0] - 2026-07-24
 

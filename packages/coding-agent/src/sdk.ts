@@ -36,6 +36,7 @@ import {
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
+import { createSettingsHooksExtension } from "./settings-hooks";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
@@ -1899,9 +1900,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (customToolsLoadResult.tools.length > 0) {
 				customTools.push(...customToolsLoadResult.tools.map(loaded => loaded.tool));
 			}
-
 			inlineExtensions.push(...(options.extensions ?? []));
 			inlineExtensions.push(createAutoresearchExtension);
+			inlineExtensions.push(createSettingsHooksExtension);
 			if (customTools.length > 0) {
 				inlineExtensions.push(createCustomToolsExtension(customTools));
 			}
