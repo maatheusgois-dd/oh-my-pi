@@ -5347,16 +5347,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"claudeHooks.trustProject": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Trust Project Hooks",
-			description: "Also execute hooks from .claude/settings.json in the project directory (not just ~/.claude/settings.json)",
-		},
-	},
 
 	"gc.blobs": { type: "boolean", default: true },
 

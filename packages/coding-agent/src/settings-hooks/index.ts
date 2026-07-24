@@ -286,27 +286,19 @@ function mergeHooks(base: ClaudeHooks, addition: ClaudeHooks): void {
 }
 
 /**
- * Read hooks from user-level settings.json (always) and project-level
- * settings.json (only when `trustProject` is true).
+ * Read hooks from user-level settings.json only.
+ * Project-level hooks (.claude/settings.json in the repo) are NOT loaded
+ * to prevent untrusted repos from executing arbitrary shell commands.
+ * Project hook support requires an explicit trust UI (future enhancement).
  */
-async function readSettingsHooks(home: string, cwd: string, trustProject: boolean): Promise<ClaudeHooks | null> {
+async function readSettingsHooks(home: string): Promise<ClaudeHooks | null> {
+	if (!home) return null;
 	const hooks: ClaudeHooks = {};
 
-	// Only load user-level hooks from a real HOME directory.
-	// When HOME is empty/unset, path.join("", ".claude", ...) resolves to a
-	// relative path that could pick up project-level hooks as user hooks.
-	if (home) {
-		const { hooks: userHooks, disabled } = await tryReadHooksFromSettings(path.join(home, ".claude", "settings.json"));
-		// If ANY source disables hooks, return null for the entire merge
-		if (disabled) return null;
-		if (userHooks) mergeHooks(hooks, userHooks);
-	}
-
-	if (trustProject) {
-		const { hooks: projectHooks, disabled } = await tryReadHooksFromSettings(path.join(cwd, ".claude", "settings.json"));
-		if (disabled) return null;
-		if (projectHooks) mergeHooks(hooks, projectHooks);
-	}
+	const { hooks: userHooks, disabled } = await tryReadHooksFromSettings(path.join(home, ".claude", "settings.json"));
+	// Honor Claude's kill switch
+	if (disabled) return null;
+	if (userHooks) mergeHooks(hooks, userHooks);
 
 	const hasHooks = Boolean(hooks.PreToolUse?.length || hooks.PostToolUse?.length);
 	return hasHooks ? hooks : null;
@@ -314,20 +306,17 @@ async function readSettingsHooks(home: string, cwd: string, trustProject: boolea
 
 // ─── Extension factory ───────────────────────────────────────────────────
 
-export function createSettingsHooksExtension(trustProject = false): ExtensionFactory {
+export function createSettingsHooksExtension(): ExtensionFactory {
 	return (api: ExtensionAPI) => {
 	let loadedHooks: ClaudeHooks | null | undefined;
-	let loadedCwd: string | null = null;
 
-	const ensureLoaded = async (cwd: string, home: string): Promise<ClaudeHooks | null> => {
-		if (loadedCwd === cwd && loadedHooks !== undefined) return loadedHooks;
-		loadedCwd = cwd;
-		loadedHooks = await readSettingsHooks(home, cwd, trustProject);
+	const ensureLoaded = async (home: string): Promise<ClaudeHooks | null> => {
+		if (loadedHooks !== undefined) return loadedHooks;
+		loadedHooks = await readSettingsHooks(home);
 		if (loadedHooks) {
 			logger.info("settings-hooks: loaded Claude Code hooks from settings.json", {
 				preToolUse: loadedHooks.PreToolUse?.length ?? 0,
 				postToolUse: loadedHooks.PostToolUse?.length ?? 0,
-				trustProject,
 			});
 		}
 		return loadedHooks;
@@ -336,7 +325,7 @@ export function createSettingsHooksExtension(trustProject = false): ExtensionFac
 	// PreToolUse — can block execution
 	api.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallEventResult | void> => {
 	const home = process.env.HOME ?? "";
-	const hooks = await ensureLoaded(ctx.cwd, home);
+	const hooks = await ensureLoaded(home);
 		if (!hooks?.PreToolUse) return;
 
 	let denyResult: ToolCallEventResult | undefined;
@@ -406,7 +395,7 @@ export function createSettingsHooksExtension(trustProject = false): ExtensionFac
 		if (event.isError) return;
 
 	const home = process.env.HOME ?? "";
-	const hooks = await ensureLoaded(ctx.cwd, home);
+	const hooks = await ensureLoaded(home);
 		if (!hooks?.PostToolUse) return;
 
 		for (const group of hooks.PostToolUse) {

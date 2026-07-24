@@ -67,7 +67,7 @@
 - Fixed legacy Pi extensions failing validation when importing the upstream `keyText` keybinding helper ([#6470](https://github.com/can1357/oh-my-pi/issues/6470)).
 ### Added
 
-- Added execution of Claude Code `PreToolUse`/`PostToolUse` hooks defined in `~/.claude/settings.json` and `.claude/settings.json`. Hooks are parsed from the `hooks` key, translated from Claude's PascalCase tool matchers (`Bash`, `Edit`, `Write`, `Read`) to OMP tool ids, and shell-executed with Claude's stdin/stdout protocol (`{"tool_input": ..., "cwd": ...}`). A `permissionDecision: "deny"` or non-zero exit code blocks the tool call via the existing `tool_call` event bus, reusing the `beforeToolCall` seam. PostToolUse hooks observe tool results. The feature activates automatically when `settings.json` contains a `hooks` key.
+- Added execution of Claude Code `PreToolUse`/`PostToolUse` hooks from `~/.claude/settings.json`. Hooks are parsed from the `hooks` key, translated from Claude's PascalCase tool matchers to OMP tool ids, and shell-executed with Claude's stdin/stdout protocol. Exit code 2 or `permissionDecision: "deny"` blocks the tool call via the existing `tool_call` event bus. PostToolUse hooks observe results (skipped on errors). Gated behind the `claudeHooks.enabled` setting (off by default). Project-level `.claude/settings.json` hooks are not loaded to prevent untrusted repos from executing arbitrary commands.
 
 ## [17.1.0] - 2026-07-24
 

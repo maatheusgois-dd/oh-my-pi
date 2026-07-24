@@ -107,7 +107,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		const event = makeCallEvent("bash", { command: "git push origin main" });
 		const result = await api.toolCallHandlers[0](event, makeCtx());
@@ -125,7 +125,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		const event = makeCallEvent("bash", { command: "echo hello" });
 		const result = await api.toolCallHandlers[0](event, makeCtx());
@@ -143,7 +143,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		const event = makeCallEvent("bash", { command: "git commit" });
 		const result = await api.toolCallHandlers[0](event, makeCtx());
@@ -163,7 +163,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		const event = makeCallEvent("bash", { command: "ls" });
 		const result = await api.toolCallHandlers[0](event, makeCtx());
@@ -181,7 +181,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		const event = makeCallEvent("bash", { command: "ls" });
 		const result = await api.toolCallHandlers[0](event, makeCtx());
@@ -198,7 +198,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		// Should block any tool
 		for (const toolName of ["bash", "read", "write", "edit"]) {
@@ -218,7 +218,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		// edit should be blocked
 		const editEvent = makeCallEvent("edit");
@@ -241,7 +241,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		// edit and write should be blocked
 		for (const toolName of ["edit", "write"]) {
@@ -267,7 +267,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		for (const toolName of ["bash", "read", "edit"]) {
 			const event = makeCallEvent(toolName);
@@ -284,7 +284,7 @@ describe("settings-hooks extension", () => {
 		await fs.writeFile(path.join(dir, "settings.json"), JSON.stringify({ someOtherKey: true }));
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		// Even though handlers are registered, they should find no hooks and not block
 		const event = makeCallEvent("bash", { command: "ls" });
@@ -292,7 +292,7 @@ describe("settings-hooks extension", () => {
 		expect(result).toBeUndefined();
 	});
 
-	test("project-level settings.json hooks merge with user-level hooks", async () => {
+	test("project-level settings.json hooks are NOT loaded (security: no self-grant)", async () => {
 		// User-level: deny bash
 		await writeUserSettings({
 			PreToolUse: [
@@ -300,7 +300,7 @@ describe("settings-hooks extension", () => {
 			],
 		});
 
-		// Project-level: also deny write
+		// Project-level: also deny write — should NOT be loaded
 		const projectDir = path.join(tmpCwd, ".claude");
 		await fs.mkdir(projectDir, { recursive: true });
 		await fs.writeFile(
@@ -315,17 +315,16 @@ describe("settings-hooks extension", () => {
 		);
 
 		const api = createMockApi();
-		createSettingsHooksExtension(true)(api);
+		createSettingsHooksExtension()(api);
 
 		// bash → blocked by user-level hook
 		const bashResult = await api.toolCallHandlers[0](makeCallEvent("bash", { command: "ls" }), makeCtx());
 		expect(bashResult?.block).toBe(true);
 		expect(bashResult?.reason).toBe("user-level deny");
 
-		// write → blocked by project-level hook
+		// write → NOT blocked (project hooks are not loaded)
 		const writeResult = await api.toolCallHandlers[0](makeCallEvent("write"), makeCtx());
-		expect(writeResult?.block).toBe(true);
-		expect(writeResult?.reason).toBe("project-level deny");
+		expect(writeResult).toBeUndefined();
 	});
 
 	test("PostToolUse hook receives tool result and does not block", async () => {
@@ -339,7 +338,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		expect(api.toolResultHandlers).toHaveLength(1);
 
@@ -371,7 +370,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		const event = makeResultEvent(
 			"bash",
@@ -396,7 +395,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		const event = makeCallEvent("bash", { command: "rm -rf /" });
 		const result = await api.toolCallHandlers[0](event, makeCtx());
@@ -414,7 +413,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		// git push should be blocked
 		const pushEvent = makeCallEvent("bash", { command: "git push origin main" });
@@ -443,7 +442,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		const event = makeCallEvent("read", { path: "/tmp/test.txt" });
 		await api.toolCallHandlers[0](event, makeCtx());
@@ -466,7 +465,7 @@ describe("settings-hooks extension", () => {
 		});
 
 		const api = createMockApi();
-		createSettingsHooksExtension(false)(api);
+		createSettingsHooksExtension()(api);
 
 		const event = makeCallEvent("bash", { command: "ls" });
 		const result = await api.toolCallHandlers[0](event, makeCtx());
