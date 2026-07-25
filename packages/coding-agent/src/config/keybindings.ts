@@ -70,6 +70,16 @@ export function getDefaultPasteImageKeys(platform: NodeJS.Platform = process.pla
 	return ["ctrl+v"];
 }
 
+/** Darwin-only Cmd+Enter (super+enter) default for the follow-up keybinding.
+ * On macOS terminals, Cmd+Enter is the natural submit chord (matching Codex).
+ * Linux/Windows have Super mapped to the Win key, where it's not a natural
+ * follow-up chord and was previously free — don't claim it there. */
+function getDefaultFollowUpKeys(platform: NodeJS.Platform = process.platform): KeyId[] {
+	const keys: KeyId[] = ["ctrl+q", "ctrl+enter"];
+	if (platform === "darwin") keys.push("super+enter");
+	return keys;
+}
+
 /**
  * All keybindings definitions: TUI + app-specific.
  */
@@ -131,7 +141,9 @@ export const KEYBINDINGS = {
 		// Ctrl+Enter is preserved for terminals that deliver it (Kitty/iTerm2/WezTerm/Ghostty),
 		// but Windows Terminal does not emit a distinct event for Ctrl+Enter — Ctrl+Q is listed
 		// first so the default binding works there without remapping (#1903).
-		defaultKeys: ["ctrl+q", "ctrl+enter"],
+		// super+enter (Cmd+Enter on macOS, Darwin-only) is also bound so macOS
+		// users get the same "queue a follow-up" muscle memory as Codex.
+		defaultKeys: getDefaultFollowUpKeys(),
 		description: "Send follow-up message",
 	},
 	"app.retry": {
@@ -510,7 +522,7 @@ function migrateKeybindingsConfigFile(agentDir: string): void {
 }
 
 const FOLLOW_UP_KEYBINDING: AppKeybinding = "app.message.followUp";
-const WINDOWS_FOLLOW_UP_FALLBACK_KEY: KeyId = "ctrl+q";
+
 function keyListIncludes(keys: KeyId | KeyId[] | undefined, target: KeyId): boolean {
 	if (keys === undefined) return false;
 	const keyList = Array.isArray(keys) ? keys : [keys];
@@ -527,10 +539,6 @@ function userBindingClaimsKey(config: KeybindingsConfig, target: KeyId, except: 
 		if (keyListIncludes(keys, target)) return true;
 	}
 	return false;
-}
-
-function removeKey(keys: KeyId[], target: KeyId): KeyId[] {
-	return keys.filter(key => key !== target);
 }
 
 function keyConfigValue(keys: KeyId[]): KeyId | KeyId[] {
@@ -597,10 +605,11 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 		const keys = super.getKeys(keybinding);
 		if (keybinding === FOLLOW_UP_KEYBINDING) {
 			if (this.#userBindings[FOLLOW_UP_KEYBINDING] !== undefined) return keys;
-			if (!userBindingClaimsKey(this.#userBindings, WINDOWS_FOLLOW_UP_FALLBACK_KEY, FOLLOW_UP_KEYBINDING)) {
-				return keys;
-			}
-			return removeKey(keys, WINDOWS_FOLLOW_UP_FALLBACK_KEY);
+			// Drop any follow-up default key that a different user binding already claims,
+			// so the explicit remap wins (e.g. app.editor.external: super+enter must not
+			// also fire the follow-up queue). Previously only ctrl+q was stripped (#1903);
+			// super+enter needs the same guard now that it is a default (#6554).
+			return keys.filter(key => !userBindingClaimsKey(this.#userBindings, key, FOLLOW_UP_KEYBINDING));
 		}
 		return keys;
 	}
@@ -644,6 +653,7 @@ const MODIFIER_LABELS: Record<string, string> = {
 	ctrl: "Ctrl",
 	shift: "Shift",
 	alt: "Alt",
+	super: process.platform === "darwin" ? "Cmd" : "Super",
 };
 
 const KEY_LABELS: Record<string, string> = {

@@ -5,6 +5,9 @@
 ### Added
 
 - Added `/undolast` (alias `/undo`) slash command that rewinds the conversation to the entry before the last user message, using the existing `navigateTree` branching infrastructure. Skips synthetic auto-continue messages and refuses to rewind past the first turn ([#5289](https://github.com/can1357/oh-my-pi/issues/5289)).
+- Added `super+enter` (Cmd+Enter on macOS, Darwin-only) as a default keybinding for the follow-up message queue (`app.message.followUp`), matching the Ctrl+Enter / Ctrl+Q chords already in place. macOS users can now queue follow-up messages with Cmd+Enter — the same key they use in Codex. The default is dropped when another user binding already claims `super+enter`, preserving explicit remaps.
+- Made the hook-editor hint text dynamic so it reflects the actual configured follow-up and external-editor keybindings instead of hardcoded `ctrl+q`/`ctrl+enter` strings.
+- Made the `super` modifier display as `Cmd` on macOS and `Super` on other platforms in key hint labels.
 
 ## [17.1.3] - 2026-07-24
 

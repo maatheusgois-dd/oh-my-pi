@@ -359,9 +359,31 @@ describe("HookEditorComponent prompt-style mode", () => {
 		expect(lines[0]).toMatch(/^─+$/);
 		expect(lines.at(-1)).toMatch(/^─+$/);
 		expect(lines[4]?.startsWith("> ")).toBe(true);
-		expect(rendered).toContain("enter or ctrl+q submit  esc cancel");
+		expect(rendered).toContain(
+			process.platform === "darwin"
+				? "enter or Ctrl+Q/Ctrl+Enter/Cmd+Enter submit  esc cancel"
+				: "enter or Ctrl+Q/Ctrl+Enter submit  esc cancel",
+		);
 		expect(rendered).not.toContain("shift+enter newline");
-		expect(rendered).toContain("ctrl+g external editor");
+		expect(rendered).toContain("Ctrl+G external editor");
+	});
+
+	it("renders dynamic hint with non-default follow-up and external-editor keys", () => {
+		const manager = KeybindingsManager.inMemory({
+			"app.message.followUp": "alt+enter",
+			"app.editor.external": "ctrl+e",
+		});
+		setKeybindings(manager);
+
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, vi.fn(), vi.fn(), {
+			promptStyle: true,
+		});
+		const rendered = renderText(component);
+
+		// Hint must show the custom keys, not the defaults
+		expect(rendered).toContain("Alt+Enter submit");
+		expect(rendered).toContain("Ctrl+E external editor");
+		expect(rendered).not.toContain("Ctrl+Q");
 	});
 
 	it("anchors the hardware cursor while entering an Other response", () => {

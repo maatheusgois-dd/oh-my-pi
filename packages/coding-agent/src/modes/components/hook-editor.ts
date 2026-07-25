@@ -7,7 +7,17 @@
  *   (Ctrl+Q / Ctrl+Enter) submits, bordered popup
  * - Prompt-style (ask): Enter submits, Shift+Enter inserts newline, legacy ask chrome
  */
-import { Container, Editor, type Focusable, matchesKey, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
+import {
+	Container,
+	Editor,
+	type Focusable,
+	getKeybindings,
+	matchesKey,
+	Spacer,
+	Text,
+	type TUI,
+} from "@oh-my-pi/pi-tui";
+import { formatKeyHints } from "../../config/keybindings";
 import { getEditorTheme, theme } from "../../modes/theme/theme";
 import {
 	matchesAppExternalEditor,
@@ -84,9 +94,11 @@ export class HookEditorComponent extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 
 		// Hint
+		const followUpKeys = formatKeyHints(getKeybindings().getKeys("app.message.followUp"));
+		const externalKeys = formatKeyHints(getKeybindings().getKeys("app.editor.external"));
 		const hint = this.#promptStyle
-			? "enter or ctrl+q submit  esc cancel  ctrl+g external editor"
-			: "ctrl+q/ctrl+enter submit  esc cancel  ctrl+g external editor";
+			? `enter or ${followUpKeys} submit  esc cancel  ${externalKeys} external editor`
+			: `${followUpKeys} submit  esc cancel  ${externalKeys} external editor`;
 		this.addChild(new Text(theme.fg("dim", hint), chromePadX, 0));
 
 		this.addChild(new Spacer(1));

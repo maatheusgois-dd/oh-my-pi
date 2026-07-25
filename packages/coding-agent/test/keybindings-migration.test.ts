@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { matchesAppFollowUp } from "@oh-my-pi/pi-coding-agent/modes/utils/keybinding-matchers";
-import { type KeybindingsConfig, setKeybindings } from "@oh-my-pi/pi-tui";
+import { type KeybindingsConfig, type KeyId, setKeybindings } from "@oh-my-pi/pi-tui";
 import {
 	__resetDirsFromEnvForTests,
 	getAgentDir,
@@ -13,6 +13,20 @@ import {
 	setProfile,
 } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+
+/** Expected follow-up default keys for the current platform — Darwin adds super+enter. */
+const FOLLOW_UP_DEFAULTS: KeyId[] =
+	process.platform === "darwin" ? ["ctrl+q", "ctrl+enter", "super+enter"] : ["ctrl+q", "ctrl+enter"];
+
+/** Expected follow-up keys when ctrl+q is claimed by another binding. */
+const FOLLOW_UP_WITHOUT_CTRL_Q: KeyId[] =
+	process.platform === "darwin" ? ["ctrl+enter", "super+enter"] : ["ctrl+enter"];
+
+/** Display string for follow-up without ctrl+q. */
+const FOLLOW_UP_DISPLAY_WITHOUT_CTRL_Q = process.platform === "darwin" ? "Ctrl+Enter/Cmd+Enter" : "Ctrl+Enter";
+
+/** Whether super+enter is a follow-up default on this platform. */
+const SUPER_ENTER_IS_DEFAULT = process.platform === "darwin";
 
 function ctrl(key: string): string {
 	return String.fromCharCode(key.toLowerCase().charCodeAt(0) & 31);
@@ -313,7 +327,7 @@ describe("KeybindingsManager.create", () => {
 			// Both chords must be registered so Windows Terminal users (which swallow
 			// Ctrl+Enter at the terminal layer) get a working follow-up binding out
 			// of the box, without breaking users on Kitty/iTerm2/WezTerm/Ghostty.
-			expect(manager.getKeys("app.message.followUp")).toEqual(["ctrl+q", "ctrl+enter"]);
+			expect(manager.getKeys("app.message.followUp")).toEqual(FOLLOW_UP_DEFAULTS);
 		} finally {
 			await removeWithRetries(agentDir);
 		}
@@ -326,11 +340,25 @@ describe("KeybindingsManager.create", () => {
 		setKeybindings(manager);
 
 		expect(manager.getKeys("app.plan.toggle")).toEqual(["ctrl+q"]);
-		expect(manager.getKeys("app.message.followUp")).toEqual(["ctrl+enter"]);
-		expect(manager.getDisplayString("app.message.followUp")).toBe("Ctrl+Enter");
-		expect(manager.getEffectiveConfig()["app.message.followUp"]).toBe("ctrl+enter");
+		expect(manager.getKeys("app.message.followUp")).toEqual(FOLLOW_UP_WITHOUT_CTRL_Q);
+		expect(manager.getDisplayString("app.message.followUp")).toBe(FOLLOW_UP_DISPLAY_WITHOUT_CTRL_Q);
+		expect(manager.getEffectiveConfig()["app.message.followUp"]).toEqual(
+			FOLLOW_UP_WITHOUT_CTRL_Q.length === 1 ? FOLLOW_UP_WITHOUT_CTRL_Q[0] : FOLLOW_UP_WITHOUT_CTRL_Q,
+		);
 		expect(matchesAppFollowUp(ctrl("q"))).toBe(false);
 		expect(matchesAppFollowUp("\x1b[13;5u")).toBe(true);
+	});
+
+	it("removes super+enter from follow-up defaults when another binding claims it (#6554)", () => {
+		const manager = KeybindingsManager.inMemory({
+			"app.editor.external": "super+enter",
+		});
+		setKeybindings(manager);
+
+		expect(manager.getKeys("app.editor.external")).toEqual(["super+enter"]);
+		// super+enter must be dropped from follow-up so it doesn't shadow the explicit remap
+		expect(manager.getKeys("app.message.followUp")).toEqual(FOLLOW_UP_DEFAULTS.filter(k => k !== "super+enter"));
+		expect(matchesAppFollowUp("\x1b[13;9u")).toBe(false);
 	});
 
 	it("keeps the Ctrl+Q follow-up default when only an unknown config key claims it (#1903)", () => {
@@ -338,7 +366,7 @@ describe("KeybindingsManager.create", () => {
 			"unknown.action": "ctrl+q",
 		});
 
-		expect(manager.getKeys("app.message.followUp")).toEqual(["ctrl+q", "ctrl+enter"]);
+		expect(manager.getKeys("app.message.followUp")).toEqual(FOLLOW_UP_DEFAULTS);
 	});
 
 	it("keeps Ctrl+Q when the user explicitly assigns it to follow-up (#1903)", () => {
@@ -347,5 +375,14 @@ describe("KeybindingsManager.create", () => {
 		});
 
 		expect(manager.getKeys("app.message.followUp")).toEqual(["ctrl+q"]);
+	});
+
+	it("matches Kitty super+enter CSI-u sequence as follow-up only on Darwin (#6554)", () => {
+		const manager = KeybindingsManager.inMemory({});
+		setKeybindings(manager);
+
+		// Kitty CSI-u for super+enter: ESC [ 13 ; 9 u
+		// Only a default on Darwin; on Linux/Win the sequence doesn't match follow-up
+		expect(matchesAppFollowUp("\x1b[13;9u")).toBe(SUPER_ENTER_IS_DEFAULT);
 	});
 });
